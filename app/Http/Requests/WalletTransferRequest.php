@@ -39,6 +39,7 @@ class WalletTransferRequest extends FormRequest
                 'string',
                 'max:255',
             ],
+            'idempotency_key' => ['nullable', 'string', 'max:100'],
 
         ];
     }
@@ -87,9 +88,7 @@ class WalletTransferRequest extends FormRequest
                     $this->input('recipient')
                 ),
 
-            'amount' =>
-                (float)
-                $this->input('amount'),
+            'amount' => (string) $this->input('amount'),
 
             'description' =>
                 trim(
@@ -99,6 +98,7 @@ class WalletTransferRequest extends FormRequest
                         ''
                     )
                 ) ?: null,
+            'idempotency_key' => $this->header('Idempotency-Key') ?? $this->input('idempotency_key'),
 
         ]);
     }

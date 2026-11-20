@@ -107,14 +107,9 @@ class WalletTransferService
             ]
         );
 
-        $amount =
-            (float) $data['amount'];
-
-        if ($amount <= 0) {
-            throw new Exception(
-                'Invalid transfer amount.'
-            );
-        }
+        $currency = strtoupper($sender->wallet->currency);
+        $amountUnits = TransferMoney::units($data['amount'], $currency);
+        $amount = TransferMoney::decimal($amountUnits, $currency);
 
         /*
         |--------------------------------------------------------------------------
@@ -122,12 +117,9 @@ class WalletTransferService
         |--------------------------------------------------------------------------
         */
 
-        $fee = $this->calculateFee(
-            $amount
-        );
-
-        $total =
-            $amount + $fee;
+        $feeUnits = TransferMoney::fee($amountUnits, 1);
+        $fee = TransferMoney::decimal($feeUnits, $currency);
+        $total = TransferMoney::decimal($amountUnits + $feeUnits, $currency);
 
         return [
 
@@ -267,14 +259,9 @@ class WalletTransferService
         |--------------------------------------------------------------------------
         */
 
-        $amount =
-            (float) $data['amount'];
-
-        if ($amount <= 0) {
-            throw new Exception(
-                'Invalid transfer amount.'
-            );
-        }
+        $currency = strtoupper($sender->wallet->currency);
+        $amountUnits = TransferMoney::units($data['amount'], $currency);
+        $amount = TransferMoney::decimal($amountUnits, $currency);
 
         /*
         |--------------------------------------------------------------------------
@@ -282,12 +269,33 @@ class WalletTransferService
         |--------------------------------------------------------------------------
         */
 
-        $fee = $this->calculateFee(
-            $amount
-        );
+        $feeUnits = TransferMoney::fee($amountUnits, 1);
+        $fee = TransferMoney::decimal($feeUnits, $currency);
+        $totalUnits = $amountUnits + $feeUnits;
+        $total = TransferMoney::decimal($totalUnits, $currency);
 
-        $total =
-            $amount + $fee;
+        if (strtoupper($recipient->wallet->currency) !== $currency) {
+            throw new Exception('Transfers require matching wallet currencies.');
+        }
+
+        $idempotencyKey = $data['idempotency_key'] ?? null;
+        $requestHash = hash('sha256', json_encode([
+            'recipient_id' => $recipient->id,
+            'amount' => $amount,
+            'currency' => $currency,
+            'description' => $data['description'] ?? null,
+        ], JSON_THROW_ON_ERROR));
+        if ($idempotencyKey) {
+            $existing = WalletTransfer::where('sender_id', $sender->id)->where('idempotency_key', $idempotencyKey)->first();
+            if ($existing) {
+                if (!hash_equals((string) $existing->request_hash, $requestHash)) {
+                    throw new Exception('Idempotency key was already used for a different transfer.');
+                }
+                return ['reference' => $existing->reference, 'status' => $existing->status,
+                    'amount' => $existing->amount, 'fee' => $existing->fee, 'total' => $existing->total,
+                    'currency' => $existing->currency, 'idempotent_replay' => true];
+            }
+        }
 
         /*
         |--------------------------------------------------------------------------
@@ -296,8 +304,8 @@ class WalletTransferService
         */
 
         if (
-            (float) $sender->wallet->balance
-            < $total
+            TransferMoney::units((string) $sender->wallet->balance, $currency)
+            < $totalUnits
         ) {
             throw new Exception(
                 'Insufficient wallet balance.'
@@ -325,8 +333,14 @@ class WalletTransferService
                 $recipient,
                 $amount,
                 $fee,
+                $feeUnits,
+                $amountUnits,
                 $total,
+                $totalUnits,
+                $currency,
                 $reference,
+                $idempotencyKey,
+                $requestHash,
                 $data
             ) {
 
@@ -395,9 +409,8 @@ class WalletTransferService
                 */
 
                 if (
-                    (float)
-                        $senderWallet->balance
-                    < $total
+                    TransferMoney::units((string) $senderWallet->balance, $currency)
+                    < $totalUnits
                 ) {
                     throw new Exception(
                         'Insufficient wallet balance.'
@@ -410,10 +423,10 @@ class WalletTransferService
                 |--------------------------------------------------------------------------
                 */
 
-                $senderWallet->balance =
-                    (float)
-                        $senderWallet->balance
-                    - $total;
+                $senderWallet->balance = TransferMoney::decimal(
+                    TransferMoney::units((string) $senderWallet->balance, $currency) - $totalUnits,
+                    $currency
+                );
 
                 $senderWallet->save();
 
@@ -423,10 +436,10 @@ class WalletTransferService
                 |--------------------------------------------------------------------------
                 */
 
-                $recipientWallet->balance =
-                    (float)
-                        $recipientWallet->balance
-                    + $amount;
+                $recipientWallet->balance = TransferMoney::decimal(
+                    TransferMoney::units((string) $recipientWallet->balance, $currency) + $amountUnits,
+                    $currency
+                );
 
                 $recipientWallet->save();
 
@@ -441,6 +454,8 @@ class WalletTransferService
 
                         'reference' =>
                             $reference,
+                        'idempotency_key' => $idempotencyKey,
+                        'request_hash' => $requestHash,
 
                         'sender_id' =>
                             $sender->id,
@@ -541,6 +556,14 @@ class WalletTransferService
                     ],
 
                 ]);
+
+                app(PlatformFeeLedger::class)->post(
+                    $reference,
+                    $currency,
+                    $amountUnits,
+                    $feeUnits,
+                    'wallet_transfer'
+                );
 
                 /*
                 |--------------------------------------------------------------------------
@@ -1236,26 +1259,9 @@ class WalletTransferService
     |--------------------------------------------------------------------------
     */
 
-    protected function calculateFee(
-        float $amount
-    ): float {
-
-        if ($amount <= 10000) {
-            return 10;
-        }
-
-        if ($amount <= 50000) {
-            return 25;
-        }
-
-        if ($amount <= 100000) {
-            return 50;
-        }
-
-        return round(
-            $amount * 0.005,
-            2
-        );
+    protected function calculateFee(float $amount): float
+    {
+        return round($amount * 0.01, 2);
     }
 
 

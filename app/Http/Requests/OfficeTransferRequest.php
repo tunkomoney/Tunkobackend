@@ -120,6 +120,7 @@ class OfficeTransferRequest extends FormRequest
                 'nullable',
                 'boolean',
             ],
+            'idempotency_key' => ['nullable', 'string', 'max:100'],
         ];
     }
 
@@ -166,6 +167,7 @@ class OfficeTransferRequest extends FormRequest
                         (string) $this->description
                     )
                     : null,
+            'idempotency_key' => $this->header('Idempotency-Key') ?? $this->input('idempotency_key'),
         ]);
     }
 }

@@ -11,6 +11,8 @@ class WalletTransfer extends Model
 
     protected $fillable = [
         'reference',
+        'idempotency_key',
+        'request_hash',
         'sender_id',
         'recipient_id',
         'sender_wallet_id',

@@ -181,66 +181,13 @@ public function destinations(): array
         |--------------------------------------------------------------------------
         */
 
-        $feesIncluded =
-            (bool) (
-                $data['fees_included']
-                ?? false
-            );
-
-        $fee =
-            $this->calculateFee(
-                $amount
-            );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Total
-        |--------------------------------------------------------------------------
-        */
-
-        if ($feesIncluded) {
-
-            /*
-             * The entered amount already contains
-             * the transfer fee.
-             */
-
-            $total =
-                round(
-                    $amount,
-                    2
-                );
-
-            $transferAmount =
-                round(
-                    $amount - $fee,
-                    2
-                );
-
-            if ($transferAmount <= 0) {
-                throw new Exception(
-                    'Transfer amount is too small to cover the fee.'
-                );
-            }
-
-        } else {
-
-            /*
-             * Fee is added to the entered amount.
-             */
-
-            $transferAmount =
-                round(
-                    $amount,
-                    2
-                );
-
-            $total =
-                round(
-                    $amount + $fee,
-                    2
-                );
-        }
+        $feesIncluded = false;
+        $amountUnits = TransferMoney::units($data['amount'], $currency);
+        $feeUnits = TransferMoney::fee($amountUnits, 2);
+        $transferAmount = TransferMoney::decimal($amountUnits, $currency);
+        $fee = TransferMoney::decimal($feeUnits, $currency);
+        $totalUnits = $amountUnits + $feeUnits;
+        $total = TransferMoney::decimal($totalUnits, $currency);
 
         /*
         |--------------------------------------------------------------------------
@@ -249,8 +196,8 @@ public function destinations(): array
         */
 
         if (
-            (float) $sender->wallet->balance
-            < $total
+            TransferMoney::units((string) $sender->wallet->balance, $currency)
+            < $totalUnits
         ) {
             throw new Exception(
                 'Insufficient wallet balance.'
@@ -429,50 +376,32 @@ public function destinations(): array
         |--------------------------------------------------------------------------
         */
 
-        $feesIncluded =
-            (bool) (
-                $data['fees_included']
-                ?? false
-            );
+        $feesIncluded = false;
+        $amountUnits = TransferMoney::units($data['amount'], $currency);
+        $feeUnits = TransferMoney::fee($amountUnits, 2);
+        $transferAmount = TransferMoney::decimal($amountUnits, $currency);
+        $fee = TransferMoney::decimal($feeUnits, $currency);
+        $totalUnits = $amountUnits + $feeUnits;
+        $total = TransferMoney::decimal($totalUnits, $currency);
 
-        $fee =
-            $this->calculateFee(
-                $amount
-            );
-
-        if ($feesIncluded) {
-
-            $total =
-                round(
-                    $amount,
-                    2
-                );
-
-            $transferAmount =
-                round(
-                    $amount - $fee,
-                    2
-                );
-
-            if ($transferAmount <= 0) {
-                throw new Exception(
-                    'Transfer amount is too small to cover the fee.'
-                );
+        $idempotencyKey = $data['idempotency_key'] ?? null;
+        $requestHash = hash('sha256', json_encode([
+            'destination_office_id' => $office->id,
+            'recipient_phone' => $data['recipient_phone'],
+            'amount' => $transferAmount,
+            'currency' => $currency,
+            'reason' => $data['reason'] ?? null,
+        ], JSON_THROW_ON_ERROR));
+        if ($idempotencyKey) {
+            $existing = OfficeTransfer::where('sender_id', $sender->id)->where('idempotency_key', $idempotencyKey)->first();
+            if ($existing) {
+                if (!hash_equals((string) $existing->request_hash, $requestHash)) {
+                    throw new Exception('Idempotency key was already used for a different transfer.');
+                }
+                return ['reference' => $existing->reference, 'transfer_id' => $existing->id,
+                    'status' => $existing->status, 'amount' => $existing->amount, 'fee' => $existing->fee,
+                    'total' => $existing->total, 'currency' => $existing->currency, 'idempotent_replay' => true];
             }
-
-        } else {
-
-            $transferAmount =
-                round(
-                    $amount,
-                    2
-                );
-
-            $total =
-                round(
-                    $amount + $fee,
-                    2
-                );
         }
 
         /*
@@ -482,8 +411,8 @@ public function destinations(): array
         */
 
         if (
-            (float) $sender->wallet->balance
-            < $total
+            TransferMoney::units((string) $sender->wallet->balance, $currency)
+            < $totalUnits
         ) {
             throw new Exception(
                 'Insufficient wallet balance.'
@@ -513,10 +442,15 @@ public function destinations(): array
                 $office,
                 $transferAmount,
                 $fee,
+                $feeUnits,
+                $amountUnits,
                 $total,
+                $totalUnits,
                 $currency,
                 $feesIncluded,
                 $reference,
+                $idempotencyKey,
+                $requestHash,
                 $data
             ) {
 
@@ -557,8 +491,8 @@ public function destinations(): array
                 */
 
                 if (
-                    (float) $wallet->balance
-                    < $total
+                    TransferMoney::units((string) $wallet->balance, $currency)
+                    < $totalUnits
                 ) {
                     throw new Exception(
                         'Insufficient wallet balance.'
@@ -571,12 +505,10 @@ public function destinations(): array
                 |--------------------------------------------------------------------------
                 */
 
-                $wallet->balance =
-                    round(
-                        (float) $wallet->balance
-                        - $total,
-                        2
-                    );
+                $wallet->balance = TransferMoney::decimal(
+                    TransferMoney::units((string) $wallet->balance, $currency) - $totalUnits,
+                    $currency
+                );
 
                 $wallet->save();
 
@@ -591,6 +523,8 @@ public function destinations(): array
 
                         'reference' =>
                             $reference,
+                        'idempotency_key' => $idempotencyKey,
+                        'request_hash' => $requestHash,
 
                         'sender_id' =>
                             $sender->id,
@@ -762,6 +696,14 @@ public function destinations(): array
                             $office->id,
                     ],
                 ]);
+
+                app(PlatformFeeLedger::class)->post(
+                    $reference,
+                    $currency,
+                    $amountUnits,
+                    $feeUnits,
+                    'office_transfer'
+                );
 
                 /*
                 |--------------------------------------------------------------------------
@@ -1184,26 +1126,9 @@ public function destinations(): array
     |--------------------------------------------------------------------------
     */
 
-    protected function calculateFee(
-        float $amount
-    ): float {
-
-        if ($amount <= 10000) {
-            return 10;
-        }
-
-        if ($amount <= 50000) {
-            return 25;
-        }
-
-        if ($amount <= 100000) {
-            return 50;
-        }
-
-        return round(
-            $amount * 0.005,
-            2
-        );
+    protected function calculateFee(float $amount): float
+    {
+        return round($amount * 0.02, 2);
     }
 
 

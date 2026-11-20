@@ -406,6 +406,9 @@ Route::prefix('admin')->group(function () {
                         'transactions'
                     );
 
+                    Route::get('/revenue', 'revenue');
+                    Route::get('/reconciliation', 'reconcile');
+
                     Route::post(
                         '/fund',
                         'fund'

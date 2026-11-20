@@ -12,6 +12,7 @@ class AdminWallet extends Model
         'wallet_name',
         'wallet_number',
         'currency',
+        'account_type',
         'balance',
         'status',
         'description',

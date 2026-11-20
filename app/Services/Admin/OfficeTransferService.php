@@ -5,6 +5,9 @@ namespace App\Services\Admin;
 use App\Models\OfficeTransfer;
 use App\Models\Wallet;
 use App\Models\Transaction;
+use App\Models\AdminWallet;
+use App\Models\AdminWalletTransaction;
+use App\Services\TransferMoney;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Exception;
@@ -95,8 +98,66 @@ class OfficeTransferService
             throw new Exception('Customer wallet not found for refund.');
         }
 
-        $wallet->balance = round((float) $wallet->balance + (float) $transfer->total, 2);
+        $currency = strtoupper($transfer->currency);
+        $wallet->balance = TransferMoney::decimal(
+            TransferMoney::units((string) $wallet->balance, $currency)
+                + TransferMoney::units((string) $transfer->total, $currency),
+            $currency
+        );
         $wallet->save();
+
+        $revenue = AdminWallet::query()->where('currency', $currency)
+            ->where('account_type', 'platform_revenue')->lockForUpdate()->first();
+        if ($revenue && TransferMoney::units((string) $transfer->fee, $currency) > 0) {
+            $feeUnits = TransferMoney::units((string) $transfer->fee, $currency);
+            $before = (string) $revenue->balance;
+            $beforeUnits = TransferMoney::units($before, $currency);
+            if ($beforeUnits < $feeUnits) {
+                throw new Exception('Platform revenue balance is insufficient to reverse the office transfer fee.');
+            }
+            $after = TransferMoney::decimal($beforeUnits - $feeUnits, $currency);
+            $revenue->balance = $after;
+            $revenue->save();
+            AdminWalletTransaction::create([
+                'admin_wallet_id' => $revenue->id,
+                'reference' => 'REV-FEE-' . $transfer->reference,
+                'type' => 'debit',
+                'amount' => $transfer->fee,
+                'balance_before' => $before,
+                'balance_after' => $after,
+                'currency' => $currency,
+                'source' => 'office_transfer_reversal',
+                'description' => 'Fee reversal for ' . $transfer->reference,
+            ]);
+        }
+
+        $originalJournal = DB::table('financial_journals')->where('reference', $transfer->reference)->first();
+        if ($originalJournal) {
+            $reversalReference = 'REV-' . $transfer->reference;
+            if (!DB::table('financial_journals')->where('reference', $reversalReference)->exists()) {
+                $reversalId = DB::table('financial_journals')->insertGetId([
+                    'reference' => $reversalReference,
+                    'currency' => $currency,
+                    'source' => 'office_transfer_reversal',
+                    'reversal_of' => $transfer->reference,
+                    'description' => $reason,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                $entries = DB::table('financial_journal_entries')->where('journal_id', $originalJournal->id)->get();
+                foreach ($entries as $entry) {
+                    DB::table('financial_journal_entries')->insert([
+                        'journal_id' => $reversalId,
+                        'account_type' => $entry->account_type,
+                        'account_id' => $entry->account_id,
+                        'side' => $entry->side === 'debit' ? 'credit' : 'debit',
+                        'amount' => $entry->amount,
+                        'currency' => $entry->currency,
+                        'created_at' => now(), 'updated_at' => now(),
+                    ]);
+                }
+            }
+        }
 
         Transaction::create([
             'user_id' => $transfer->sender_id,

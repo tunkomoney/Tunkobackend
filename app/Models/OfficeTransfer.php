@@ -10,6 +10,8 @@ class OfficeTransfer extends Model
     protected $fillable = [
 
         'reference',
+        'idempotency_key',
+        'request_hash',
 
         'sender_id',
 
